@@ -27,16 +27,18 @@ ACQ_PERIOD_S = 1.0 / ACQ_HZ
 RDK = Robolink()
 obj = RDK.Item(OBJ_NAME, ITEM_TYPE_OBJECT)
 
-# Si vols provar sense RoboDK o sense objecte, posa DRY_RUN=True
+# If you want to test without RoboDK, set DRY_RUN=True
 DRY_RUN = False
 
 if not DRY_RUN and not obj.Valid():
     raise Exception(f'RoboDK object not found: "{OBJ_NAME}"')
 
+# Save the initial pose (full 4x4 pose)
 if not DRY_RUN:
     pose0 = obj.Pose()
     x0, y0, z0 = pose0[0, 3], pose0[1, 3], pose0[2, 3]
 else:
+    pose0 = None
     x0, y0, z0 = 0.0, 0.0, 0.0
 
 # -----------------------------
@@ -48,12 +50,9 @@ stop_flag = False
 
 
 def read_orientation(sock):
-    """
-    Reads one UDP packet, returns dict or None.
-    Filters by TARGET_DEVICE.
-    """
+    """Reads one UDP packet, returns dict or None. Filters by TARGET_DEVICE."""
     try:
-        data, addr = sock.recvfrom(BUFFER_SIZE)
+        data, _addr = sock.recvfrom(BUFFER_SIZE)
     except socket.timeout:
         return None
 
@@ -78,9 +77,7 @@ def read_orientation(sock):
 
 
 def apply_orientation(obj, roll_deg, pitch_deg, yaw_deg):
-    """
-    Applies RPY to RoboDK object pose, keeping x0,y0,z0 fixed.
-    """
+    """Applies RPY to RoboDK object pose, keeping x0,y0,z0 fixed."""
     r = roll_deg  * pi / 180.0
     p = pitch_deg * pi / 180.0
     y = yaw_deg   * pi / 180.0
@@ -100,56 +97,58 @@ def udp_thread():
     Simple logic:
       - keep the most recent packet (last_pkt)
       - every ACQ_PERIOD_S: apply last_pkt (if exists)
-    This is very easy to reason about and test.
     """
     global stop_flag
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((UDP_IP, UDP_PORT))
-    sock.settimeout(0.05)  # short timeout so we can poll often
 
-    last_pkt = None
+    try:
+        sock.bind((UDP_IP, UDP_PORT))
+        sock.settimeout(0.05)  # short timeout so we can poll often
 
-    # for displayed rate = applies per second
-    n_apply = 0
-    t_rate0 = time.time()
+        last_pkt = None
 
-    while not stop_flag:
-        # 1) poll UDP a few times quickly to get the latest packet
-        t_poll_end = time.time() + 0.5 * ACQ_PERIOD_S
-        while time.time() < t_poll_end:
-            pkt = read_orientation(sock)
-            if pkt is not None:
-                last_pkt = pkt
+        # for displayed rate = applies per second
+        n_apply = 0
+        t_rate0 = time.time()
 
-        # 2) apply the latest packet once per cycle
-        if last_pkt is not None:
-            apply_orientation(obj, last_pkt["roll"], last_pkt["pitch"], last_pkt["yaw"])
+        while not stop_flag:
+            # 1) poll UDP a few times quickly to get the latest packet
+            t_poll_end = time.time() + 0.5 * ACQ_PERIOD_S
+            while time.time() < t_poll_end and not stop_flag:
+                pkt = read_orientation(sock)
+                if pkt is not None:
+                    last_pkt = pkt
 
-            n_apply += 1
-            dt = time.time() - t_rate0
-            hz = (n_apply / dt) if dt > 0 else 0.0
-            if dt >= 1.0:
-                n_apply = 0
-                t_rate0 = time.time()
+            # 2) apply the latest packet once per cycle
+            if last_pkt is not None and not stop_flag:
+                apply_orientation(obj, last_pkt["roll"], last_pkt["pitch"], last_pkt["yaw"])
 
-            with lock:
-                latest["device"] = last_pkt["device"]
-                latest["roll"] = last_pkt["roll"]
-                latest["pitch"] = last_pkt["pitch"]
-                latest["yaw"] = last_pkt["yaw"]
-                latest["s3"] = last_pkt["s3"]
-                latest["s4"] = last_pkt["s4"]
-                latest["hz"] = hz
-                latest["status"] = "OK"
-        else:
-            with lock:
-                latest["status"] = "waiting (no packets)"
+                n_apply += 1
+                dt = time.time() - t_rate0
+                hz = (n_apply / dt) if dt > 0 else 0.0
+                if dt >= 1.0:
+                    n_apply = 0
+                    t_rate0 = time.time()
 
-        # 3) wait until next acquisition tick
-        time.sleep(ACQ_PERIOD_S)
+                with lock:
+                    latest["device"] = last_pkt["device"]
+                    latest["roll"] = last_pkt["roll"]
+                    latest["pitch"] = last_pkt["pitch"]
+                    latest["yaw"] = last_pkt["yaw"]
+                    latest["s3"] = last_pkt["s3"]
+                    latest["s4"] = last_pkt["s4"]
+                    latest["hz"] = hz
+                    latest["status"] = "OK"
+            else:
+                with lock:
+                    latest["status"] = "waiting (no packets)"
 
-    sock.close()
+            # 3) wait until next acquisition tick
+            time.sleep(ACQ_PERIOD_S)
+
+    finally:
+        sock.close()
 
 
 # -----------------------------
@@ -175,8 +174,28 @@ def gui_update():
 
 
 def on_close():
+    """
+    When closing the Tkinter window:
+      1) stop the UDP thread
+      2) restore initial pose
+      3) close GUI
+    """
     global stop_flag
     stop_flag = True
+
+    # Wait a bit so the thread stops applying poses
+    try:
+        th.join(timeout=1.0)
+    except Exception:
+        pass
+
+    # Restore initial pose
+    if not DRY_RUN and pose0 is not None:
+        try:
+            obj.setPose(pose0)
+        except Exception as e:
+            print(f"Warning: could not restore initial pose: {e}")
+
     root.destroy()
 
 
