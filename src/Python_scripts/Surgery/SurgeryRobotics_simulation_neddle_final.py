@@ -35,6 +35,12 @@ DEV_ENDO = "G5_Endo"     # IMU on tool/endowrist
 DEV_GRIP = "G5_Gri"      # IMU on gripper
 DEV_SERVO = "G5_Servos"  # torques
 
+# IMU -> Tool frame fixed mounting correction
+# The IMU frame is rotated +90 deg about X relative to the RoboDK tool frame
+# Therefore: R_tool_world = R_imu_world * Rx(-90deg)
+ENDO_IMU_MOUNT_RX_DEG = 0.0 #-90.0   # tool <- imu correction
+GRIP_IMU_MOUNT_RX_DEG = 0.0     # if gripper IMU is aligned, keep 0
+
 # Loop rates
 STATE_HZ = 50.0         # how often we read latest UDP snapshot and compute targets
 ROBOT_CMD_HZ = 5.0      # how often we actually send MoveL commands to the robot
@@ -309,9 +315,11 @@ def control_thread(robot, base, gripper, needle,
             s3 = endo.get("s3", 1)
             s4 = endo.get("s4", 1)
 
-            R_endo_world = rotz(math.radians(get_zero_yaw_tool())) * R_world_from_rpy_deg_extrinsic(
+            R_imu_world = rotz(math.radians(get_zero_yaw_tool())) * R_world_from_rpy_deg_extrinsic(
                 e_roll, e_pitch, e_yaw
             )
+            R_mount = rotx(math.radians(ENDO_IMU_MOUNT_RX_DEG))  # fixed mounting correction
+            R_endo_world = R_imu_world * R_mount
 
             pose_robot_old = robot.Pose()
             pose_robot_new = pose_with_same_translation(pose_robot_old, R_endo_world)
